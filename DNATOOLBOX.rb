@@ -29,6 +29,9 @@ class ChrSizes
 			@sizeHash[key]=size.to_i();
 		}
 	end
+	def hasKey(k)
+		return !@sizeHash[k].nil?;
+	end
 	def [](k)
 		return @sizeHash[k];
 	end
@@ -82,6 +85,56 @@ class ChrSeq
 		#@fileHash[key]=nil;
 		@fileHash.delete(key);
 	end
+end
+
+class FASTASeq < ChrSeq
+	def initialize(fastaFile)
+		@seqHash = Hash.new();
+		lastName=nil;
+		lastSeq="";
+		File.foreach(fastaFile){|line|
+			line.chomp!();
+			if line==nil || line==""
+				next;
+			end
+			if line[0,1]==">" #header
+				if !lastName.nil?
+					@seqHash[lastName]=lastSeq;
+				end
+				lastName=line[1,line.length()-1];
+				lastSeq="";
+			else #seq
+				lastSeq=lastSeq+line;
+			end
+		}
+		if !lastName.nil?
+			@seqHash[lastName]=lastSeq;
+		end
+	end
+	def hasKey(key)
+		if @seqHash[key]==nil;
+			return false;
+		end
+		return true;
+	end
+	def keys()
+		return @seqHash.keys();
+	end
+	def loadKey(key)
+	end
+	def [](key)
+		if @seqHash[key]==nil
+			raise("Unknown key for mapping: "+key+"\n");
+		end
+		return @seqHash[key];
+	end
+	def []=(key, vals)
+		@seqHash[key]=vals;
+	end
+	def delete(key)
+		@seqHash.delete(key);
+	end
+	
 end
 
 class ChrVals <ChrSeq
@@ -820,6 +873,21 @@ class PFM
 		}
 		@myPWM = newPFM;
 	end
+
+	def calcIC(background={"A"=>0.25, "T"=>0.25, "G"=>0.25, "C"=>0.25})
+		ic=0;
+		0.upto(self.length()-1){|i|
+			background.keys().each(){|base|
+				if @myPWM[base][i]==0
+					ic +=0;
+				else
+					ic+=(@myPWM[base][i]*Math.log(@myPWM[base][i]/background[base])/Math.log(2));
+				end
+			}
+		}
+		return ic;
+	end
+
 	def normalize()
 		totals = [0.0]*self.length();
 		@myPWM.keys.each{|b|
@@ -1125,6 +1193,14 @@ class PFM
 			end
 			tempArray = @myPWM[curBase].map{|a| a.to_s}
 			returnMe+=tempArray.join("\t")+"\n"
+		}
+		return returnMe
+	end
+	def to_Jaspar()
+		returnMe=""
+		["A", "T", "G", "C"].each{|curBase|
+			tempArray = @myPWM[curBase].map{|a|(a*1000).round().to_s}
+			returnMe+=curBase+" [ "+tempArray.join(" ")+" ]\n"
 		}
 		return returnMe
 	end

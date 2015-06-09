@@ -293,6 +293,14 @@ class PLPMFromFileScoringFtn < PWMScoringFtn
 	end
 end
 
+class PWMFromPWMFileScoringFtn < PWMScoringFtn
+	def initialize(filePath)
+		thePWM = smartLoadPFMFromFile(filePath);
+		@PWM = thePWM.myPWM;
+		@rcPWM = thePWM.revcomp().myPWM;
+	end
+end
+
 class PWMFromFileScoringFtn < PWMScoringFtn
 	def initialize(filePath)
 		thePFM = smartLoadPFMFromFile(filePath);
@@ -905,14 +913,24 @@ class GFFProfiler
 			totalLength+=  fLen;#-@myScoringFtn.length+1;
 			count+=1;
 		}
-		@avgFeatureLength = totalLength/count; 
+		if (count==0)
+			@avgFeatureLength = 0; 
+		else
+			@avgFeatureLength = totalLength/count; 
+		end
 		#print(count.to_s()+" "+ totalLength.to_s()+" "+@avgFeatureLength.to_s()+"\n");
 		@chromosomes =ChrSeq.new(genomeFP);
 		@flank=flankingSeq;
 		@useAvg=false;
 		@scaleCentres=true;
+		@verbose=false;
 	end
 	
+	def verbose(logFile)
+		@verbose=true;
+		@logFile=logFile;
+		@logFile.print("Verbose output\n");
+	end
 	def revGFFs()
 		0.upto(@allGFFs.length()-1){|i|
 			if @allGFFs[i][3]=="+"
@@ -1079,6 +1097,7 @@ class GFFProfiler
 	end
 	
 	def doThisGFF(chr, st, en, strand)
+		@logFile.print(["Current entry:",chr, st, en, strand].join(" ")+"\n") if @verbose;
 		if st> @chromosomes[chr].length()-1|| en <0
 			raise("Entry beyond end of chromosome "+chr+" "+st.to_s+" "+en.to_s+" "+strand+"\n");
 		end
@@ -1089,10 +1108,9 @@ class GFFProfiler
 			strandOffsetEnd = @myScoringFtn.length()-1;
 			strandOffsetSt=0;
 		end
-		#print([chr, st, en, strand].join(" "));
-		idealStart=st-@flank-strandOffsetSt;
+		idealStart=st-@flank+strandOffsetSt;
 		fStart = [0,idealStart].max();
-		idealEnd=en+@flank-strandOffsetSt;
+		idealEnd=en+@flank-strandOffsetEnd;
 		fEnd = [@chromosomes[chr].length()-1, idealEnd].min();
 		#fEnd-= (@myScoringFtn.length()-1);
 		#print(" "+[fStart, fEnd, @chromosomes[chr].length].join(" ")+"\n");
@@ -1100,15 +1118,25 @@ class GFFProfiler
 			print("skipping this entry due to going off end of chr.\n");
 			return makeNaNProfile();
 		end
+		@logFile.print("Scanning... ") if @verbose;
 		curProfile = self.makeProfile(chr, fStart, fEnd, strand);
+		@logFile.print("End NaNing... ") if @verbose;
+		#print(curProfile.join(" ")+"\n");
+		#now add NaNs to end if appropriate
+		fEnd.upto(en+@flank-1){|i| #NaNs at end #updated 20130130
+			curProfile.push(NaN);
+		}
+		#print(curProfile.join(" ")+"\n");
+
 		fullProfile = [];
 		#now add NaNs to front if appropriate
 
 		#add initial NaNs
-		(idealStart).upto(fStart-1){|i| #NaNs at start
+		(st-@flank).upto(fStart-1){|i| #NaNs at start
 			fullProfile.push(NaN);
 		}
 		cPIndex=0;
+		@logFile.print("Scaleing... ") if @verbose;
 		
 		if @scaleCentres
 			(fStart).upto(st-1-strandOffsetSt){|i| #non-NaN start
@@ -1117,7 +1145,7 @@ class GFFProfiler
 			}
 			#now scale middle bin accordingly to @avgFeatureLength.
 			curLen=(en - st+1); 
-			#p([curProfile.length(),curLen,cPIndex]); #exit;
+			#p([curProfile.length(),curLen,cPIndex,  @avgFeatureLength]); #exit;
 			thisMid = reshapeData(curProfile, curLen, cPIndex);
 			fullProfile.concat(thisMid.map{|e|e.to_s});
 			cPIndex+=(curLen);
@@ -1132,14 +1160,10 @@ class GFFProfiler
 			}
 		end
 		
-		
-		#now add NaNs to end if appropriate
-		fEnd.upto(idealEnd-1-strandOffsetSt){|i| #NaNs at end #updated 20130130
-			fullProfile.push(NaN);
-		}
 		if strand=="-"
 			fullProfile.reverse!();
 		end
+		@logFile.print("Done.\n") if @verbose;
 		return fullProfile;
 	end
 
@@ -1147,6 +1171,7 @@ class GFFProfiler
 
 	def profile(outFP)
 		outFile = smartGZOut(outFP, "w");
+		@logFile.print("Printing header\n") if @verbose;
 		outFile.print(self.header());
 		@allGFFs.each{|chr, st, en, strand, name|
 			if @chromosomes.hasKey(chr) #added 20130323 to avoid printing missing gff entries for missing chrs
@@ -1154,7 +1179,7 @@ class GFFProfiler
 					fullProfile = doThisGFF(chr, st, en, strand);
 				rescue Exception => e
 					warn("Error raised for chr=#{chr} st=#{(st+1).to_s()}, en=#{(en+1).to_s}, strand=#{strand}"); 
-					raise(e.message+"\n"+e.backtrace.join("\n")+"\n");
+					raise(e.message+"\n"+e.backtrace.join("\n")+"\n"); # go to the line before this one in the error message
 				end
 				outFile.print(name+"\t"+fullProfile.join("\t")+"\n");
 			end
@@ -1210,7 +1235,37 @@ class GFFProfiler
 	end
 
 end
-
+class FASTAProfiler < GFFProfiler
+	def initialize(fastaFP, myScoringFtn)
+		@myScoringFtn = myScoringFtn;
+		@allGFFs = [];
+		count=0;
+		totalLength=0;
+		@maxFeatureLength=0;
+		@chromosomes =FASTASeq.new(fastaFP);
+		fastaFile = File.open(fastaFP,"r");
+		File.foreach(fastaFP){|line|  #here, chr is actually the FASTA ID
+			if line[0,1]==">"
+				st = 0;
+				chr = line[1,line.length()-1].chomp();
+				en = @chromosomes[chr].length()-1;
+				fLen=en-st+1;
+				@maxFeatureLength=[@maxFeatureLength,fLen].max();
+				@allGFFs.push([chr, st, en, "+", chr]);
+				totalLength+=  fLen;
+				count+=1;
+			end
+		}
+		@avgFeatureLength = totalLength/count; 
+		#print(count.to_s()+" "+ totalLength.to_s()+" "+@avgFeatureLength.to_s()+"\n");
+		@flank=0;
+		@useAvg=false;
+		@scaleCentres=true;
+		@verbose=false;
+	end
+	
+	
+end
 class GFFProfilerTrack < GFFProfiler
 	def initialize(gffFP, genomeFP, flankingSeq, tracks)
 		require "GENOMEDATA.rb";
@@ -1427,13 +1482,67 @@ end
 
 
 
-def getProfiler(gffFP, details)
+def getFASTAProfiler(fastaFP, scoreMethod, motif)
+	#make Scoring method
+	useAvg=false;
+	if scoreMethod[-2,2]=="-A"
+		raise("-A not a valid extension for FASTA Score method");
+	end
+	case scoreMethod
+	when "C"
+		myScoringFtn = ConsensusScoringFtn.new(motif)
+	when "GSF"
+		require "GOMERSCORER.rb";
+		myScoringFtn = GomerScorerFromFile.new(motif, 0);
+	when "GST"
+		require "GOMERSCORER.rb";
+		myScoringFtn = GomerScorerFromFile.new(motif, 1);
+	when "GSR"
+		require "GOMERSCORER.rb";
+		myScoringFtn = GomerScorerFromFile.new(motif, -1);
+	when "D"
+		myScoringFtn = NonSSConsensusScoringFtn.new(motif)
+	when "NSSPLPMF"
+		myScoringFtn = NonSSPLPMFromFileScoringFtn.new(motif)
+	when "PLPMF"
+		myScoringFtn = PLPMFromFileScoringFtn.new(motif)
+	when "K"
+		myScoringFtn = PWMFromPWMFileScoringFtn.new(motif)
+	when "P"
+		myScoringFtn = PWMFromIUPACScoringFtn.new(motif)
+	when "N"
+		myScoringFtn = NeutralPWMFromFileScoringFtn.new(motif);
+	when "F"
+		myScoringFtn = PWMFromFileScoringFtn.new(motif);
+	when "Q"
+		myScoringFtn = NonSSPWMFromIUPACScoringFtn.new(motif)
+	when "G"
+		myScoringFtn = NonSSPWMFromFileScoringFtn.new(motif);
+	when "T"
+		myScoringFtn = TestScoringFtn.new();
+	when "B"
+		myScoringFtn = ONLYBESTPWMFromFileScoringFtn.new(motif);
+	else 
+		raise("BAD SCORING METHOD");
+	end
+
+	#make profiler
+	profiler = FASTAProfiler.new(fastaFP, myScoringFtn);
+	return profiler;
+end
+
+
+def getProfiler(gffFP, details ) #deprecated, use getGFFProfiler
 	stuff = details.split("_");
 	genome=stuff[0];
-	accessibility=stuff[1];
+	accessibility=stuff[1]=~/[YyTt]/;
 	scoreMethod = stuff[2];
 	motif = stuff[3, stuff.length()-1-3].join("_");
 	flankingSeq=stuff[stuff.length()-1].to_i();
+	return getGFFProfiler(gffFP, genome,scoreMethod,motif,flankingSeq,accessibility)
+end
+
+def getGFFProfiler(gffFP, genome,scoreMethod,motif,flankingSeq,accessibility)
 	#make Scoring method
 	useAvg=false;
 	if scoreMethod[-2,2]=="-A"
@@ -1458,6 +1567,8 @@ def getProfiler(gffFP, details)
 		myScoringFtn = NonSSPLPMFromFileScoringFtn.new(motif)
 	when "PLPMF"
 		myScoringFtn = PLPMFromFileScoringFtn.new(motif)
+	when "K"
+		myScoringFtn = PWMFromPWMFileScoringFtn.new(motif)
 	when "P"
 		myScoringFtn = PWMFromIUPACScoringFtn.new(motif)
 	when "N"
@@ -1475,50 +1586,50 @@ def getProfiler(gffFP, details)
 	end
 	#get genome
 	case genome
-	when "MMv37-chr1"
-		genomeFP=HOME+"/genomes/mouse/NCBIv37/justchr1.map";
-	when "MMv37-chr2"
-		genomeFP=HOME+"/genomes/mouse/NCBIv37/justchr2.map";
-	when "MMv37-chr3"
-		genomeFP=HOME+"/genomes/mouse/NCBIv37/justchr3.map";
-	when "MMv37-chr4"
-		genomeFP=HOME+"/genomes/mouse/NCBIv37/justchr4.map";
-	when "MMv37-chr5"
-		genomeFP=HOME+"/genomes/mouse/NCBIv37/justchr5.map";
-	when "MMv37-chr6"
-		genomeFP=HOME+"/genomes/mouse/NCBIv37/justchr6.map";
-	when "MMv37-chr7"
-		genomeFP=HOME+"/genomes/mouse/NCBIv37/justchr7.map";
-	when "MMv37-chr8"
-		genomeFP=HOME+"/genomes/mouse/NCBIv37/justchr8.map";
-	when "MMv37-chr9"
-		genomeFP=HOME+"/genomes/mouse/NCBIv37/justchr9.map";
-	when "MMv37-chr10"
-		genomeFP=HOME+"/genomes/mouse/NCBIv37/justchr10.map";
-	when "MMv37-chr11"
-		genomeFP=HOME+"/genomes/mouse/NCBIv37/justchr11.map";
-	when "MMv37-chr12"
-		genomeFP=HOME+"/genomes/mouse/NCBIv37/justchr12.map";
-	when "MMv37-chr13"
-		genomeFP=HOME+"/genomes/mouse/NCBIv37/justchr13.map";
-	when "MMv37-chr14"
-		genomeFP=HOME+"/genomes/mouse/NCBIv37/justchr14.map";
-	when "MMv37-chr15"
-		genomeFP=HOME+"/genomes/mouse/NCBIv37/justchr15.map";
-	when "MMv37-chr16"
-		genomeFP=HOME+"/genomes/mouse/NCBIv37/justchr16.map";
-	when "MMv37-chr17"
-		genomeFP=HOME+"/genomes/mouse/NCBIv37/justchr17.map";
-	when "MMv37-chr18"
-		genomeFP=HOME+"/genomes/mouse/NCBIv37/justchr18.map";
-	when "MMv37-chr19"
-		genomeFP=HOME+"/genomes/mouse/NCBIv37/justchr19.map";
-	when "MMv37-chrX"
-		genomeFP=HOME+"/genomes/mouse/NCBIv37/justchrX.map";
-	when "MMv37-chrY"
-		genomeFP=HOME+"/genomes/mouse/NCBIv37/justchrY.map";
-	when "MMv37"
-		genomeFP=HOME+"/genomes/mouse/NCBIv37/chr.map";
+	when "NC12"
+		genomeFP = HOME+"/genomes/Neurospora_crassa_12/chr.map";
+	when "mm37-chr1"
+		genomeFP = HOME+"/genomes/mouse/NCBIv37/just_chr1.map";
+	when "mm37-chr2"
+		genomeFP = HOME+"/genomes/mouse/NCBIv37/just_chr2.map";
+	when "mm37-chr3"
+		genomeFP = HOME+"/genomes/mouse/NCBIv37/just_chr3.map";
+	when "mm37-chr4"
+		genomeFP = HOME+"/genomes/mouse/NCBIv37/just_chr4.map";
+	when "mm37-chr5"
+		genomeFP = HOME+"/genomes/mouse/NCBIv37/just_chr5.map";
+	when "mm37-chr6"
+		genomeFP = HOME+"/genomes/mouse/NCBIv37/just_chr6.map";
+	when "mm37-chr7"
+		genomeFP = HOME+"/genomes/mouse/NCBIv37/just_chr7.map";
+	when "mm37-chr8"
+		genomeFP = HOME+"/genomes/mouse/NCBIv37/just_chr8.map";
+	when "mm37-chr9"
+		genomeFP = HOME+"/genomes/mouse/NCBIv37/just_chr9.map";
+	when "mm37-chr10"
+		genomeFP = HOME+"/genomes/mouse/NCBIv37/just_chr10.map";
+	when "mm37-chr11"
+		genomeFP = HOME+"/genomes/mouse/NCBIv37/just_chr11.map";
+	when "mm37-chr12"
+		genomeFP = HOME+"/genomes/mouse/NCBIv37/just_chr12.map";
+	when "mm37-chr13"
+		genomeFP = HOME+"/genomes/mouse/NCBIv37/just_chr13.map";
+	when "mm37-chr14"
+		genomeFP = HOME+"/genomes/mouse/NCBIv37/just_chr14.map";
+	when "mm37-chr15"
+		genomeFP = HOME+"/genomes/mouse/NCBIv37/just_chr15.map";
+	when "mm37-chr16"
+		genomeFP = HOME+"/genomes/mouse/NCBIv37/just_chr16.map";
+	when "mm37-chr17"
+		genomeFP = HOME+"/genomes/mouse/NCBIv37/just_chr17.map";
+	when "mm37-chr18"
+		genomeFP = HOME+"/genomes/mouse/NCBIv37/just_chr18.map";
+	when "mm37-chr19"
+		genomeFP = HOME+"/genomes/mouse/NCBIv37/just_chr19.map";
+	when "mm37-chrX"
+		genomeFP = HOME+"/genomes/mouse/NCBIv37/just_chrX.map";
+	when "mm37-chrY"
+		genomeFP = HOME+"/genomes/mouse/NCBIv37/just_chrY.map";
 	when "Dmel5NH"
 		genomeFP=HOME+"/genomes/drosophila/Dmel_Release5/chr_noHet.map";
 	when "Dmel5"
@@ -1573,6 +1684,58 @@ def getProfiler(gffFP, details)
 		genomeFP=HOME+"/genomes/human/hg18/justchrY.map";
 	when "hg18"
 		genomeFP=HOME+"/genomes/human/hg18/chr.map";
+	when "hg19-chr1"
+		genomeFP=HOME+"/genomes/human/hg19/justchr1.map";
+	when "hg19-chr2"
+		genomeFP=HOME+"/genomes/human/hg19/justchr2.map";
+	when "hg19-chr3"
+		genomeFP=HOME+"/genomes/human/hg19/justchr3.map";
+	when "hg19-chr4"
+		genomeFP=HOME+"/genomes/human/hg19/justchr4.map";
+	when "hg19-chr5"
+		genomeFP=HOME+"/genomes/human/hg19/justchr5.map";
+	when "hg19-chr6"
+		genomeFP=HOME+"/genomes/human/hg19/justchr6.map";
+	when "hg19-chr7"
+		genomeFP=HOME+"/genomes/human/hg19/justchr7.map";
+	when "hg19-chr8"
+		genomeFP=HOME+"/genomes/human/hg19/justchr8.map";
+	when "hg19-chr9"
+		genomeFP=HOME+"/genomes/human/hg19/justchr9.map";
+	when "hg19-chr10"
+		genomeFP=HOME+"/genomes/human/hg19/justchr10.map";
+	when "hg19-chr11"
+		genomeFP=HOME+"/genomes/human/hg19/justchr11.map";
+	when "hg19-chr12"
+		genomeFP=HOME+"/genomes/human/hg19/justchr12.map";
+	when "hg19-chr13"
+		genomeFP=HOME+"/genomes/human/hg19/justchr13.map";
+	when "hg19-chr14"
+		genomeFP=HOME+"/genomes/human/hg19/justchr14.map";
+	when "hg19-chr15"
+		genomeFP=HOME+"/genomes/human/hg19/justchr15.map";
+	when "hg19-chr16"
+		genomeFP=HOME+"/genomes/human/hg19/justchr16.map";
+	when "hg19-chr17"
+		genomeFP=HOME+"/genomes/human/hg19/justchr17.map";
+	when "hg19-chr18"
+		genomeFP=HOME+"/genomes/human/hg19/justchr18.map";
+	when "hg19-chr19"
+		genomeFP=HOME+"/genomes/human/hg19/justchr19.map";
+	when "hg19-chr20"
+		genomeFP=HOME+"/genomes/human/hg19/justchr20.map";
+	when "hg19-chr21"
+		genomeFP=HOME+"/genomes/human/hg19/justchr21.map";
+	when "hg19-chr22"
+		genomeFP=HOME+"/genomes/human/hg19/justchr22.map";
+	when "hg19-chrX"
+		genomeFP=HOME+"/genomes/human/hg19/justchrX.map";
+	when "hg19-chrY"
+		genomeFP=HOME+"/genomes/human/hg19/justchrY.map";
+	when "hg19"
+		genomeFP=HOME+"/genomes/human/hg19/chr.map";
+	when "hg19aa"
+		genomeFP=HOME+"/genomes/human/hg19/chr_all_alias.map";
 	when "test"
 		genomeFP=HOME+"/genomes/test/chrX.map";
 	when "20110203"
@@ -1625,8 +1788,6 @@ def getProfiler(gffFP, details)
 		genomeFP=HOME+"/genomes/Yarrowia_lipolytica/chr.map";
 	when "Zygosaccharomyces-rouxii" 
 		genomeFP=HOME+"/genomes/Zygosaccharomyces_rouxii/chr.map"
-	else
-		raise("Unrecognized genome!");
 	end
 	#make profiler
 	if scoreMethod=="WIG"
@@ -1635,12 +1796,10 @@ def getProfiler(gffFP, details)
 		profiler = GFFProfilerBedGraph.new(gffFP, genomeFP, flankingSeq, motif); 
 	elsif scoreMethod=="GSF" || scoreMethod=="GST"
 		profiler = RangeScorerGFFProfiler.new(gffFP, genomeFP, myScoringFtn, flankingSeq, 20); 
-	elsif accessibility=="Y"
+	elsif accessibility
 		profiler = GFFProfilerEFBS.new(gffFP, genomeFP, myScoringFtn, flankingSeq, foldedFP);
-	elsif accessibility=="N"
-		profiler = GFFProfiler.new(gffFP, genomeFP, myScoringFtn, flankingSeq);
 	else
-		raise("BAD PARAMETER");
+		profiler = GFFProfiler.new(gffFP, genomeFP, myScoringFtn, flankingSeq);
 	end
 	profiler.useAvg() if useAvg;
 	return profiler;
